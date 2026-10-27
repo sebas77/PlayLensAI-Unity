@@ -1,14 +1,16 @@
-# PlayLens SDK: instructions for AI-assisted integration
+# PlayLens C# SDK: instructions for AI-assisted integration
 
-Read this before generating integration code. Use the public APIs in `Runtime/`,
-not guessed authentication, registration or Unity lifecycle methods. Assembly and
-namespace are `GameAnalytics.Client`. This source is shared with the standalone
-.NET SDK; keep client behavior equivalent across integrations.
+Read this before generating integration code for any C# project. Reference the
+`GameAnalytics.Client` library and use its public APIs, not guessed authentication,
+registration or lifecycle methods. Assembly and namespace are `GameAnalytics.Client`.
+No application framework is assumed. The standalone library targets .NET Standard
+2.0 and depends on System.Text.Json; resolve compatible dependencies through the
+library's build/distribution. Installation details belong in its README.
 
 ## Responsibilities
 
 - PlayLens is telemetry, **not authentication**. It does not create accounts,
-  register guests, promote users, manage account tiers or integrate Supabase.
+  register guests, promote users, manage account tiers or provide an identity service.
   Never add any of those as prerequisites to analytics.
 - The host supplies the Ready project's exact ID, reachable API base URL and
   client write key in `Headers["X-Api-Key"]`. Initialization is time synchronization,
@@ -16,40 +18,45 @@ namespace are `GameAnalytics.Client`. This source is shared with the standalone
   backend/server secret, owner tokens or dashboard credentials in a client.
 - The host creates and persists one installation UUID across launches. Supply a
   launch session UUID when it must correlate with other systems; otherwise the
-  SDK creates one per client. Player UUIDs come from the game's identity system.
+  SDK creates one per client. User UUIDs come from the application's identity system.
 - One `AnalyticsClient` owns its clock, binding, in-memory queue, retry policy and
   lifecycle. The host owns the borrowed `HttpClient`, consent, startup admissions
   and runtime delivery opportunities. The SDK never disposes the HTTP client.
-- This package has no MonoBehaviour, singleton, player-loop hook, disk queue,
+- This library has no singleton, application lifecycle hooks, disk queue,
   automatic exception capture or consent UI. Compose it through existing host
-  ownership; do not invent parallel gameplay or delivery infrastructure.
+  ownership; do not invent parallel application or delivery infrastructure.
 
-## Expected flow: initialization does not gate game entry
+## Expected application flow
 
-1. Apply the game's consent policy before collecting or submitting analytics.
+1. Apply the host's collection and consent policy before collecting or submitting
+   analytics.
 2. Construct the client with host-owned configuration and installation/session
-   IDs. Start an **observed, bounded background initialization** with the game's
-   canonical release version. Do not await analytics from login or game entry.
+   IDs. Initialize asynchronously with the application's canonical release version
+   and bounded cancellation. The analytics owner must await initialization before
+   using the client; business operations and successful login must not depend on
+   telemetry availability. If startup need not wait for analytics, observe its
+   initialization in the background rather than blocking the primary workflow.
 3. The SDK cannot Track or Bind until `InitializeAsync` succeeds. If early signals
    must survive startup, retain them in the existing host analytics boundary with
    their original properties and identity snapshots. This is not an SDK disk queue.
 4. Once initialized, track actual anonymous pre-login Funnel events. When the host
-   knows the player UUID, call `BindIdentityAsync(userId)` before later user-owned
+   knows the user UUID, call `BindIdentityAsync(userId)` before later user-owned
    Track calls. Binding is **local**, with no HTTP request, backend evidence,
    confirmation endpoint or account-registration requirement. Observe its Task.
 5. Replay retained signals in order using their captured identities, including
    null before login. Never stamp the latest user onto old events. Restore the
    latest desired identity after replay. Retire old consent generations so late
    initialization cannot publish a stale client or replay opted-out work.
-6. Deliver asynchronously after initialization. Waiting for readiness belongs
-   inside analytics, never in the player's entry path. Keep Unity Analytics and
-   other providers independent: PlayLens failure must not delay their identity
-   assignment or event recording, and must not turn successful game login into
-   a failed login.
+6. Deliver asynchronously after initialization. Waiting for analytics readiness
+   belongs inside the analytics owner, not the primary application workflow. Keep
+   any other telemetry providers independent: PlayLens failure must not delay
+   their identity assignment or event recording, or turn successful login into
+   failed login.
 
-The following illustrates calls **inside the host's background analytics flow**,
-not a login handler. All identifiers, configuration, HTTP client and bounded
-cancellation token are supplied by the host:
+The following illustrates calls **inside the host's analytics flow**, not a login
+handler. All identifiers, configuration, HTTP client and bounded cancellation
+token are supplied by the host. An executable or batch host must keep this flow
+alive until its required delivery and shutdown work completes:
 
 ```csharp
 using System.Collections.Generic;
@@ -74,7 +81,51 @@ var result = await client.FlushAsync(cancellationToken);
 // Inspect Status, Delivered, Pending and LastHttpStatusCode; Task completion is not delivery proof.
 ```
 
-## Identity and event contracts
+## Pre-login, post-login and stable identity
+
+### Pre-login versus post-login
+
+- **Pre-login:** the host knows the installation and session, but has no user UUID.
+  Leave the client unbound. Only the anonymous Funnel allowlist below is accepted;
+  do not invent a temporary user, send an empty UUID as an anonymous marker, or
+  bypass the restriction with a per-event `userId` argument.
+- **Post-login:** after the host's own identity system supplies the real user UUID,
+  await local `BindIdentityAsync(userId)` inside the analytics owner before tracking
+  user-owned events. Normally omit the optional per-event `userId`: the binding
+  supplies it. The SDK does not authenticate the user or verify an account record.
+  No backend login event or remote confirmation is needed to bind.
+- **Already signed in:** bind the existing host-known UUID after SDK initialization;
+  do not manufacture a new pre-login journey or replay milestones just because a
+  new client/session starts. Record only actions that actually occurred.
+- **Logout:** `ClearIdentity()` makes subsequent tracking unbound again. It does
+  not delete queued events. Bind the next actual user before user-owned tracking;
+  a failed application login is not a reason to assign another analytics identity.
+
+For example, an anonymous `app_started` tracked under installation I/session S
+keeps `(I, S, null)`. After binding U, later accepted events carry `(I, S, U)`.
+Even if both are delivered in one batch after login, the earlier event stays null.
+Query-time attribution of an anonymous prefix is separate from the SDK's stored
+snapshots: the server can use one unambiguous client user for the same exact
+project/installation/session, but must not guess between conflicting users or
+rewrite raw event identities.
+
+### Which identifiers stay stable
+
+| Identifier | Host/SDK responsibility and lifetime |
+| --- | --- |
+| `projectId` | Host configuration: the exact target project, unchanged for that client. It is not a user or session ID. |
+| `installationId` | Host-created UUID persisted across launches until reinstall or local-data reset. Do not generate it per login, event or flush. The current contract requires a non-null installation. |
+| `SessionId` | One UUID for the application launch/session. The SDK creates one per client if omitted; supply the host's session ID when sharing context or recreating a client within that session. Do not regenerate it for each event or identity bind. |
+| `userId` | Stable UUID from the application's identity system. The same user keeps it across sessions and installations. Guest-to-registered continuation keeps that same UUID; an actually different account has a different UUID. Never derive it from email, generate it on every login, or let analytics decide account merges. |
+| `eventId` | One ID per logical event envelope. Track creates it unless supplied; SDK retries preserve both its ID and body bytes. Retry pending delivery with `FlushAsync`, not another Track call. Never reuse an ID for a different event or changed payload. |
+| `transactionId`, `gameplayAttemptId`, `downloadId` | Host-owned causal IDs. Related events for one purchase, attempt or download share the corresponding ID; a genuinely new operation gets a new one. These are not replacements for user/session identity. |
+
+The SDK does not persist host identifiers or recover an account after reinstall.
+The host must load its installation identity and obtain its existing user UUID
+from its own identity system. Client-owned attribution is not authentication or
+proof that a client-supplied UUID is trustworthy.
+
+### Binding and snapshot invariants
 
 - `BindIdentityAsync(Guid, CancellationToken)` requires an initialized Open client
   and non-null installation ID. Same bound UUID is an idempotent no-op. A different
@@ -94,18 +145,43 @@ var result = await client.FlushAsync(cancellationToken);
   not a way to assign one. A mismatch or binding another user without clearing
   throws `IdentityLinkConflict`. The exception type retains its historical name
   `IdentityLinkException`; do not infer a network confirmation protocol from it.
-- `TrackFunnel`, `TrackGameplay`, `TrackEconomy`, `TrackDiagnostic` are synchronous
-  and return event `Guid`s. They map to wire categories `funnel`, `gameplay`,
-  `economy`, `diagnose`, respectively; every event has `source=client`. Category is
-  not inferred from a name. Choose actual actions, not invented funnel stages.
+
+## Choosing the event category
+
+| Method / wire category | Use it for | Meaning |
+| --- | --- | --- |
+| `TrackFunnel` / `funnel` | User-journey milestones such as application entry, login presentation or reaching an onboarding step. | Evidence for ordered progression and drop-off. Custom funnel charts consider this category, not every recorded event. A milestone records what actually happened, not an assumed later outcome. |
+| `TrackGameplay` / `gameplay` | Detailed activity within an interaction or run: starting/ending an attempt and individual actions or outcomes. | Behavioral detail, not automatically a funnel stage. Repeated actions may be useful here without implying new users or restarted onboarding. |
+| `TrackDiagnostic` / `diagnose` | Operational observations such as explicit application errors, heartbeats or performance measurements. | Application health and troubleshooting, not user progression or successful business outcomes. The SDK does not automatically capture exceptions. |
+| `TrackEconomy` / `economy` | Purchase-flow and other economic activity allowed for a client. | Economic behavior, not diagnostics or funnel progression. Backend-authoritative purchase/reward verdicts remain forbidden to this client. |
+
+All four methods are synchronous and return event `Guid`s; every event has
+`source=client`. **The chosen method sets the category.** Names do not infer it:
+`TrackDiagnostic("login_presented")` is not a Funnel event and does not bypass
+the unbound-tracking rules. Choose actual actions, not invented funnel stages.
+
+If one action needs both detailed activity and a Funnel milestone, deliberately
+record two separate event envelopes with different event IDs and the appropriate
+shared causal IDs. Do not silently relabel Gameplay or Diagnose events to make
+them appear in a funnel.
+
+Category also affects **opted-in automatic delivery**, not identity: an accepted
+Funnel event requests immediate asynchronous delivery of the whole captured queue;
+Gameplay, Economy and Diagnose require the due slot plus a host opportunity.
+In default manual mode all categories stay queued until an explicit Flush/Close.
+An immediate request is not a successful-delivery acknowledgment. Never choose
+the wrong category just to force a send; delivery belongs to the analytics owner.
+
+### Event inputs and validation
+
 - Optional inputs are causal `transactionId`, `gameplayAttemptId`, `downloadId`,
   flat scalar `properties`, `EventContext` and a stable retry-safe `eventId`.
   Purchase-family names require transactionId; gameplay_started/gameplay_ended
   require gameplayAttemptId; content_download* requires downloadId.
   `level_completed` requires integer `properties.level` from 1 through 200.
 - Properties permit string, finite number, boolean and null, not nested objects,
-  arrays or Unity objects. At most 32 properties, 64 characters per key and 256
-  per string value. Event names are nonblank and at most 64 characters.
+  arrays or arbitrary object instances. At most 32 properties, 64 characters per
+  key and 256 per string value. Event names are nonblank and at most 64 characters.
 - Never set event time/source/category manually. SDK-owned synchronized time,
   identity, IDs, properties, context and data revision are snapshotted at Track.
 - Initialize with exactly three numeric version components, no leading zero
@@ -121,7 +197,7 @@ var result = await client.FlushAsync(cancellationToken);
 ## Delivery, consent and shutdown
 
 - Manual delivery is default. Track queues without waiting for delivery. Call
-  `FlushAsync` from the existing analytics owner, not gameplay's critical path.
+  `FlushAsync` from the existing analytics owner, not the application's critical path.
   Flush serializes per client, captures current work and batches at most 500 in
   order; newer events may remain for another flush.
 - Retries preserve body bytes and event IDs. Only matching acknowledgments remove
@@ -135,16 +211,16 @@ var result = await client.FlushAsync(cancellationToken);
 - Optional `StartAutomaticFlushing(source, onResult, onError)` after initialization
   returns one `IDisposable` registration. The host-supplied
   `IFlushOpportunitySource.Subscribe(Action)` returns a detaching subscription and
-  must not call back inline. Do not invent EndFrameAsync or per-frame SDK driving.
+  must not call back inline. Do not invent additional SDK scheduling methods.
 - In automatic mode an accepted Funnel event requests immediate asynchronous
   **whole-queue** delivery, without runtime permission. Other categories require
   both a due 10-second slot and a runtime permission signal. Slots anchor at enable,
   skip missed intervals and do not reset on immediate/manual delivery. A retained
   failure alone must not spin retries; no permission means ordinary work waits.
 - Both automatic callbacks are required and must not throw. They use the enabling
-  SynchronizationContext when present, otherwise a thread-pool callback. Do not
-  use Unity APIs on arbitrary callback threads. Invalid/backward scheduling clock
-  readings suspend automatic delivery and report an error.
+  SynchronizationContext when present, otherwise a thread-pool callback. Marshal
+  thread-affine host operations to their owning context. Invalid/backward
+  scheduling clock readings suspend automatic delivery and report an error.
 - Consent opt-out must stop host admissions/retention, cancel the retired consent
   generation and dispose automatic registration **without Close/Flush**. Disposal
   cancels scheduling but leaves that client's queue intact; abandon the client
@@ -159,7 +235,7 @@ var result = await client.FlushAsync(cancellationToken);
 ## Verification boundaries
 
 Use host doubles or an isolated owned endpoint for integration verification.
-Compilation does not prove actual delivery, external account promotion, a live
-funnel, IL2CPP/stripping compatibility or device support. Never enter Play or send
-LIVE events just to generate metadata. Do not publish real keys, server/game
-configuration, captured events, build outputs or test data with this package.
+Compilation does not prove actual delivery, external account promotion, a completed
+live funnel or compatibility with every target runtime. Do not send LIVE events
+just to validate documentation. Do not publish real keys, application/server
+configuration, captured events, build outputs or test data with this library.
