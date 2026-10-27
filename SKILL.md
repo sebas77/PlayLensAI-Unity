@@ -66,14 +66,20 @@ Rules that matter:
 
 The MCP endpoint is the analytics host with `/mcp`, authorized by the workspace owner's OAuth
 session.
+For OpenCode V2, merge this into the consuming project's `opencode.json` (preserve other servers):
 
 ```json
 {
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "playlens": {
-      "type": "remote",
-      "url": "https://your-analytics-host/mcp",
-      "enabled": true
+    "servers": {
+      "playlens": {
+        "type": "remote",
+        "url": "https://your-analytics-host/mcp",
+        "oauth": {
+          "scope": "playlens:connect playlens:funnels:write"
+        }
+      }
     }
   }
 }
@@ -86,7 +92,18 @@ Scopes:
 - `playlens:funnels:write` — write tools (`create_funnel`, `set_installation_events`), also
   requiring `team_admin` membership.
 
-Re-authorize after a scope change. Never paste an access token into source or logs.
+If automatic OAuth registration is refused, obtain a pre-registered **public** client ID and its
+exact loopback redirect URI from the installation owner. Add `client_id` and `redirect_uri` inside
+`oauth`, matching that registration. The registration must permit the two scopes above and, when
+OpenCode requests reusable authorization, optional `offline_access`. Do not invent client IDs,
+weaken registration policy or put a client secret in the game.
+
+After saving, open OpenCode's `/mcps`, select `playlens` and sign in with the workspace owner.
+Re-authorize after changing scopes; a previously stored read-only grant does not gain write access.
+Call `connection_status` and verify the intended workspace and `team_admin` role. Confirm that
+`create_funnel` and `set_installation_events` are advertised before attempting a write. If the list
+tools are absent, the connected server may not yet have the pre-login-list feature deployed.
+Never paste an access token into source or logs.
 
 ## Tools
 
