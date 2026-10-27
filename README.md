@@ -1,7 +1,8 @@
 # PlayLens AI Unity source package
 
 Read [AI_USAGE.md](AI_USAGE.md) before integrating or generating integration code.
-This is telemetry, not authentication or account management.
+This is telemetry, not authentication or account management. For MCP setup, funnels and the
+server-owned pre-login event list, read [SKILL.md](SKILL.md).
 
 ## Install
 

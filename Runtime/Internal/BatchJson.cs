@@ -30,13 +30,15 @@ namespace GameAnalytics.Client.Internal
             }
         }
 
-        // Reads the successful acknowledgement: the accepted count plus the event IDs in request
-        // order. Unknown extra members are ignored; a missing, mistyped or unparsable member fails
-        // the read, and the caller decides whether the batch actually matched.
-        public static bool TryReadAcknowledgement(string body, out int accepted, out IReadOnlyList<Guid> eventIds)
+        // Reads the successful acknowledgement: the accepted count, the stored event IDs in request
+        // order and the refused indexes. Unknown extra members are ignored; a missing, mistyped or
+        // unparsable member fails the read, and the caller decides whether the verdict actually
+        // partitions the batch. An absent `rejected` member means nothing was refused.
+        public static bool TryReadAcknowledgement(string body, out int accepted, out IReadOnlyList<Guid> eventIds, out IReadOnlyList<int> rejectedIndexes)
         {
             accepted = 0;
             eventIds = Array.Empty<Guid>();
+            rejectedIndexes = Array.Empty<int>();
 
             JsonDocument document;
             try
@@ -71,8 +73,29 @@ namespace GameAnalytics.Client.Internal
                     ids.Add(id);
                 }
 
+                var rejected = new List<int>();
+                // An absent or explicitly null `rejected` member means nothing was refused, exactly
+                // like the JavaScript client's reader.
+                if (root.TryGetProperty("rejected", out var rejectedElement)
+                    && rejectedElement.ValueKind != JsonValueKind.Null)
+                {
+                    if (rejectedElement.ValueKind != JsonValueKind.Array)
+                        return false;
+
+                    foreach (var entry in rejectedElement.EnumerateArray())
+                    {
+                        if (entry.ValueKind != JsonValueKind.Object
+                            || entry.TryGetProperty("index", out var indexElement) == false
+                            || indexElement.ValueKind != JsonValueKind.Number
+                            || indexElement.TryGetInt32(out var index) == false)
+                            return false;
+                        rejected.Add(index);
+                    }
+                }
+
                 accepted = acceptedValue;
                 eventIds = ids;
+                rejectedIndexes = rejected;
                 return true;
             }
         }

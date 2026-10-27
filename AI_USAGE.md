@@ -7,6 +7,9 @@ No application framework is assumed. The standalone library targets .NET Standar
 2.0 and depends on System.Text.Json; resolve compatible dependencies through the
 library's build/distribution. Installation details belong in its README.
 
+For MCP setup, funnels and the server-owned pre-login event list, read
+[`SKILL.md`](SKILL.md).
+
 ## Responsibilities
 
 - PlayLens is telemetry, **not authentication**. It does not create accounts,
@@ -137,10 +140,12 @@ proof that a client-supplied UUID is trustworthy.
 - A guest continuing as a registered account with the **same UUID** stays the same
   user. Do not recreate analytics identity, restart the funnel, replay startup or
   emit another `new_player`. External identity promotion is the host's job.
-- Unbound tracking permits only Funnel names `app_started`, `config_fetch_started`,
-  `config_fetch_completed`, `config_fetch_failed`, `login_presented`,
-  `terms_accepted`, `login_started`, `login_failed`, `login_cancelled`, without a
-  supplied user. Other unbound tracking throws `IdentityLinkRequired`.
+- Unbound tracking permits any Funnel event without a supplied user; the server stores one only
+  when its name is in the project's installation-scoped list. That list is server-owned and empty
+  for a new project, configured through the PlayLens MCP (`list_installation_events`,
+  `set_installation_events`) or the project page. Other unbound tracking throws
+  `IdentityLinkRequired`. A refused name is reported per event in `FlushResult.Rejected`; the rest
+  of the batch is still stored.
 - Optional Track `userId` is a checked assertion of the **locally bound** user,
   not a way to assign one. A mismatch or binding another user without clearing
   throws `IdentityLinkConflict`. The exception type retains its historical name
@@ -206,7 +211,8 @@ the wrong category just to force a send; delivery belongs to the analytics owner
   nothing was stored. Caller cancellation throws and retains unconfirmed work.
 - Ordinary delivery failures return `FlushResult`: Complete, Pending,
   NetworkFailure, HttpFailure or InvalidResponse. Inspect counts/status and report
-  failure safely, without credentials or response bodies. `Stats` is an immutable
+  failure safely, without credentials or response bodies. `Delivered` counts accepted
+  envelopes and `Rejected` counts names the server refused; `Stats` is an immutable
   pull snapshot of envelope counts, not database rows or unique players.
 - Optional `StartAutomaticFlushing(source, onResult, onError)` after initialization
   returns one `IDisposable` registration. The host-supplied

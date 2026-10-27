@@ -62,25 +62,6 @@ namespace GameAnalytics.Client.Internal
                 throw new ArgumentException($"eventName: '{eventName}' is backend-authoritative and cannot be sent by a client.", nameof(eventName));
         }
 
-        public static bool IsPreLoginEvent(string eventName)
-        {
-            switch (eventName)
-            {
-                case "app_started":
-                case "config_fetch_started":
-                case "config_fetch_completed":
-                case "config_fetch_failed":
-                case "login_presented":
-                case "terms_accepted":
-                case "login_started":
-                case "login_failed":
-                case "login_cancelled":
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
         // Nullable construction remains, but the current server cannot confirm an absent installation.
         public static void ValidateIdentity(Guid? installationId)
         {

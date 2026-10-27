@@ -54,7 +54,7 @@ namespace GameAnalytics.Client
             get
             {
                 lock (_gate)
-                    return new DeliveryStats(_totalTracked, _totalDelivered, _queue.Count, _lastStatus, _lastHttpStatusCode);
+                    return new DeliveryStats(_totalTracked, _totalDelivered, _totalRejected, _queue.Count, _lastStatus, _lastHttpStatusCode);
             }
         }
 
@@ -215,7 +215,7 @@ namespace GameAnalytics.Client
                 // was rejected. A closed client has nothing left to send. Both are empty results
                 // that touch neither the network nor the delivery gate.
                 if (_state != LifecycleState.Open && _state != LifecycleState.Closing)
-                    return new FlushResult(0, _queue.Count, DeliveryStatus.Complete, _lastHttpStatusCode);
+                    return new FlushResult(0, 0, _queue.Count, DeliveryStatus.Complete, _lastHttpStatusCode);
             }
 
             await _flushGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -239,7 +239,7 @@ namespace GameAnalytics.Client
             lock (_gate)
             {
                 if (_state == LifecycleState.Closed)
-                    return new FlushResult(0, _queue.Count, DeliveryStatus.Complete, _lastHttpStatusCode);
+                    return new FlushResult(0, 0, _queue.Count, DeliveryStatus.Complete, _lastHttpStatusCode);
 
                 _state = LifecycleState.Closing;
                 ClearIdentityCore();
@@ -269,7 +269,11 @@ namespace GameAnalytics.Client
             _identityUserId = null;
         }
 
-        Guid? ResolveTrackingIdentity(string category, string eventName, Guid? assertedUserId)
+        // An unbound client queues any Funnel event anonymously: the installation-scoped name list is
+        // the server's, so no name is refused here and the event still needs the mandatory
+        // installation identity. A supplied user or another category fails closed, before the clock,
+        // the queue or the network is touched.
+        Guid? ResolveTrackingIdentity(string category, Guid? assertedUserId)
         {
             if (_identityState == IdentityState.Bound)
             {
@@ -277,8 +281,8 @@ namespace GameAnalytics.Client
                     throw new IdentityLinkException("IdentityLinkConflict", "The supplied userId does not match the identity bound by BindIdentityAsync.");
                 return _identityUserId;
             }
-            if (assertedUserId.HasValue || category != FunnelCategory || EventRules.IsPreLoginEvent(eventName) == false)
-                throw new IdentityLinkException("IdentityLinkRequired", "BindIdentityAsync must be called with the caller's known user before user-owned tracking; only the supported anonymous pre-login Funnel events are exempt.");
+            if (assertedUserId.HasValue || category != FunnelCategory)
+                throw new IdentityLinkException("IdentityLinkRequired", "BindIdentityAsync must be called with the caller's known user before user-owned tracking; only anonymous Funnel events are exempt.");
             return null;
         }
 
@@ -421,7 +425,7 @@ namespace GameAnalytics.Client
                 // network.
                 EventRules.ValidateEventName(eventName);
                 EventRules.ValidateClientAuthority(eventName);
-                userId = ResolveTrackingIdentity(category, eventName, userId);
+                userId = ResolveTrackingIdentity(category, userId);
                 EventRules.ValidateIdentity(_installationId);
                 var eventContext = MergeContext(_defaultContext, context);
                 EventRules.ValidateContext(eventContext);
@@ -477,7 +481,7 @@ namespace GameAnalytics.Client
             lock (_gate)
             {
                 if (_queue.Count == 0)
-                    return RecordResult(0, DeliveryStatus.Complete, null);
+                    return RecordResult(0, 0, DeliveryStatus.Complete, null);
 
                 // The drain target is the work queued at acquisition, in input order. Envelopes
                 // appended by later Track calls stay behind it and are reported as pending, so a flush
@@ -492,6 +496,7 @@ namespace GameAnalytics.Client
             }
 
             var delivered = 0;
+            var rejected = 0;
             var offset = 0;
             int? lastHttpStatus = null;
 
@@ -502,19 +507,23 @@ namespace GameAnalytics.Client
                 lastHttpStatus = delivery.HttpStatusCode;
 
                 if (delivery.Failure.HasValue)
-                    return RecordResult(delivered, delivery.Failure.Value, delivery.HttpStatusCode);
+                    return RecordResult(delivered, rejected, delivery.Failure.Value, delivery.HttpStatusCode);
 
-                // Only a confirmed batch is removed, and the removal is atomic with the counters, so
-                // the reported numbers always describe what really happened. A cancellation between
-                // batches therefore leaves every confirmed removal and count standing.
+                // Only a confirmed verdict is removed, and the removal is atomic with the counters,
+                // so the reported numbers always describe what really happened. The accepted and the
+                // refused envelopes leave the queue in that same step; only the accepted ones count
+                // as delivered. A cancellation between batches therefore leaves every confirmed
+                // removal and count standing.
                 lock (_gate)
                 {
                     for (var i = 0; i < length; i++)
                         _queue.Dequeue();
-                    _totalDelivered += length;
+                    _totalDelivered += delivery.Accepted;
+                    _totalRejected += delivery.Rejected;
                 }
 
-                delivered += length;
+                delivered += delivery.Accepted;
+                rejected += delivery.Rejected;
                 offset += length;
             }
 
@@ -528,7 +537,7 @@ namespace GameAnalytics.Client
                 _lastHttpStatusCode = lastHttpStatus;
             }
 
-            return new FlushResult(delivered, pending, status, lastHttpStatus);
+            return new FlushResult(delivered, rejected, pending, status, lastHttpStatus);
         }
 
         // One batch's delivery loop. The bytes are serialized ONCE here, off the calling thread, and
@@ -568,11 +577,11 @@ namespace GameAnalytics.Client
                     {
                         var payload = await ReadBodyOrNullAsync(response).ConfigureAwait(false);
                         if (payload == null
-                            || BatchJson.TryReadAcknowledgement(payload, out var accepted, out var eventIds) == false
-                            || AcknowledgementMatches(accepted, eventIds, captured, offset, length) == false)
+                            || BatchJson.TryReadAcknowledgement(payload, out var accepted, out var eventIds, out var rejectedIndexes) == false
+                            || TryResolveAcknowledgement(accepted, eventIds, rejectedIndexes, captured, offset, length, out var rejected) == false)
                             return ChunkDelivery.Failed(DeliveryStatus.InvalidResponse, status);
 
-                        return ChunkDelivery.Confirmed(status);
+                        return ChunkDelivery.Confirmed(status, accepted, rejected);
                     }
 
                     if (IsRetryableStatus(status) == false || attempts >= _maxAttempts)
@@ -654,24 +663,52 @@ namespace GameAnalytics.Client
         static bool IsRetryableStatus(int status)
             => status == 408 || status == 429 || (status >= 500 && status <= 599);
 
-        // A successful acknowledgement must confirm exactly this batch: the accepted count and the
-        // returned event IDs, in request order. Anything else leaves the batch (and everything behind
-        // it) queued.
-        static bool AcknowledgementMatches(int accepted, IReadOnlyList<Guid> eventIds, IReadOnlyList<EventEnvelope> captured, int offset, int length)
+        // A successful acknowledgement must account for exactly this batch: the refused indexes are
+        // unique positions inside the chunk, the accepted positions are every other position in
+        // request order, and the returned event IDs are the captured IDs at those accepted positions,
+        // in that order. The server refuses by event name, so a refused index can sit anywhere — the
+        // accepted ones are not necessarily a prefix. Anything else leaves the batch (and everything
+        // behind it) queued.
+        static bool TryResolveAcknowledgement(
+            int accepted,
+            IReadOnlyList<Guid> eventIds,
+            IReadOnlyList<int> rejectedIndexes,
+            IReadOnlyList<EventEnvelope> captured,
+            int offset,
+            int length,
+            out int rejected)
         {
-            if (accepted != length || eventIds.Count != length)
+            rejected = 0;
+            if (accepted < 0 || accepted > length || eventIds.Count != accepted)
+                return false;
+            if (accepted + rejectedIndexes.Count != length)
                 return false;
 
-            for (var i = 0; i < length; i++)
+            // A duplicate refusal or an out-of-range one would leave a position unaccounted for or
+            // counted twice, so each refused position can occur only once.
+            var refused = new bool[length];
+            foreach (var index in rejectedIndexes)
             {
-                if (eventIds[i] != captured[offset + i].EventId)
+                if (index < 0 || index >= length || refused[index])
                     return false;
+                refused[index] = true;
             }
 
+            var acceptedIndex = 0;
+            for (var position = 0; position < length; position++)
+            {
+                if (refused[position])
+                    continue;
+                if (eventIds[acceptedIndex] != captured[offset + position].EventId)
+                    return false;
+                acceptedIndex++;
+            }
+
+            rejected = rejectedIndexes.Count;
             return true;
         }
 
-        FlushResult RecordResult(int delivered, DeliveryStatus status, int? httpStatus)
+        FlushResult RecordResult(int delivered, int rejected, DeliveryStatus status, int? httpStatus)
         {
             int pending;
             lock (_gate)
@@ -681,7 +718,7 @@ namespace GameAnalytics.Client
                 _lastHttpStatusCode = httpStatus;
             }
 
-            return new FlushResult(delivered, pending, status, httpStatus);
+            return new FlushResult(delivered, rejected, pending, status, httpStatus);
         }
 
         void AddAdditionalHeaders(HttpRequestMessage request)
@@ -771,23 +808,32 @@ namespace GameAnalytics.Client
         static Task DefaultDelay(TimeSpan delay, CancellationToken cancellationToken)
             => Task.Delay(delay, cancellationToken);
 
-        // One batch's delivery outcome: Failure is null when the batch was confirmed, otherwise it
-        // carries the status that stops the drain, with the last HTTP status that was observed.
+        // One batch's delivery outcome: Failure is null when the verdict confirmed the batch,
+        // otherwise it carries the status that stops the drain, with the last HTTP status that was
+        // observed. Accepted and Rejected count the envelopes of the confirmed verdict.
         readonly struct ChunkDelivery
         {
-            ChunkDelivery(DeliveryStatus? failure, int? httpStatusCode)
+            ChunkDelivery(DeliveryStatus? failure, int? httpStatusCode, int accepted, int rejected)
             {
                 Failure = failure;
                 HttpStatusCode = httpStatusCode;
+                Accepted = accepted;
+                Rejected = rejected;
             }
 
             public DeliveryStatus? Failure { get; }
 
             public int? HttpStatusCode { get; }
 
-            public static ChunkDelivery Confirmed(int httpStatusCode) => new ChunkDelivery(null, httpStatusCode);
+            public int Accepted { get; }
 
-            public static ChunkDelivery Failed(DeliveryStatus failure, int? httpStatusCode) => new ChunkDelivery(failure, httpStatusCode);
+            public int Rejected { get; }
+
+            public static ChunkDelivery Confirmed(int httpStatusCode, int accepted, int rejected)
+                => new ChunkDelivery(null, httpStatusCode, accepted, rejected);
+
+            public static ChunkDelivery Failed(DeliveryStatus failure, int? httpStatusCode)
+                => new ChunkDelivery(failure, httpStatusCode, 0, 0);
         }
 
         // The four approved categories of the frozen wire contract; each public entry point stamps
@@ -854,6 +900,7 @@ namespace GameAnalytics.Client
         Guid? _identityUserId;
         long _totalTracked;
         long _totalDelivered;
+        long _totalRejected;
         DeliveryStatus _lastStatus = DeliveryStatus.Pending;
         int? _lastHttpStatusCode;
     }
