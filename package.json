@@ -1,0 +1,11 @@
+{
+  "name": "com.playlensai.sdk",
+  "version": "0.1.0",
+  "displayName": "PlayLens AI SDK",
+  "description": "Engine-independent PlayLens analytics client source. Read AI_USAGE.md for integration and event-flow responsibilities.",
+  "unity": "6000.6",
+  "author": {
+    "name": "PlayLens AI",
+    "url": "https://github.com/sebas77/PlayLensAI-Unity"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "GameAnalytics.Client",
+  "rootNamespace": "GameAnalytics.Client",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": true
+}
