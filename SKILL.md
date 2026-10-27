@@ -66,6 +66,11 @@ Rules that matter:
 
 The MCP endpoint is the analytics host with `/mcp`, authorized by the workspace owner's OAuth
 session.
+New installations provide public client ID `playlens-mcp`; for an existing installation, obtain
+its registered public client ID from the owner and substitute it below. No client secret is needed.
+
+### OpenCode V2
+
 For OpenCode V2, merge this into the consuming project's `opencode.json` (preserve other servers):
 
 ```json
@@ -77,6 +82,8 @@ For OpenCode V2, merge this into the consuming project's `opencode.json` (preser
         "type": "remote",
         "url": "https://your-analytics-host/mcp",
         "oauth": {
+          "client_id": "playlens-mcp",
+          "redirect_uri": "http://127.0.0.1:57535/callback",
           "scope": "playlens:connect playlens:funnels:write"
         }
       }
@@ -85,20 +92,49 @@ For OpenCode V2, merge this into the consuming project's `opencode.json` (preser
 }
 ```
 
-Scopes:
+After saving, open OpenCode's `/mcps`, select `playlens` and sign in with the workspace owner.
+
+### Claude Code
+
+Register the HTTP server using the installation's public client ID and actual MCP URL:
+
+```bash
+claude mcp add --transport http --client-id <id> --callback-port 57535 playlens <url>
+```
+
+For a new installation, use `playlens-mcp` for `<id>` and `https://your-analytics-host/mcp` for `<url>`.
+Do not pass `--client-secret`. Pin the requested read/write scopes in that server's `oauth` object
+in Claude Code's local configuration (`~/.claude.json` for the default local scope):
+
+```json
+{
+  "oauth": {
+    "clientId": "<id>",
+    "callbackPort": 57535,
+    "scopes": "playlens:connect playlens:funnels:write"
+  }
+}
+```
+
+Open Claude Code's `/mcp`, select `playlens` and authenticate with the workspace owner.
+Claude Code uses `http://localhost:<port>/callback`, not OpenCode's `127.0.0.1` host.
+The shipped registration permits both hosts and arbitrary HTTP loopback ports for `/callback`,
+so `--callback-port 57535` is optional with that registration. It remains useful for older
+registrations permitting only that fixed port. If Keycloak reports `Invalid parameter: redirect_uri`,
+ask the owner to check the registered host/path/port; don't weaken DCR policy to bypass it.
+
+### Scopes and verification
 
 - `playlens:connect` — read tools (`connection_status`, `funnel_events`, `list_funnels`,
   `list_installation_events`).
 - `playlens:funnels:write` — write tools (`create_funnel`, `set_installation_events`), also
   requiring `team_admin` membership.
 
-If automatic OAuth registration is refused, obtain a pre-registered **public** client ID and its
-exact loopback redirect URI from the installation owner. Add `client_id` and `redirect_uri` inside
-`oauth`, matching that registration. The registration must permit the two scopes above and, when
-OpenCode requests reusable authorization, optional `offline_access`. Do not invent client IDs,
-weaken registration policy or put a client secret in the game.
+The registration must permit the two scopes above and optional `offline_access` for clients
+requesting reusable authorization. Use the pre-registered public client rather than relying on
+dynamic client registration: DCR/TrustedHosts policy is a separate owner decision. Do not invent
+client IDs, weaken registration policy or put a client secret in the game.
 
-After saving, open OpenCode's `/mcps`, select `playlens` and sign in with the workspace owner.
 Re-authorize after changing scopes; a previously stored read-only grant does not gain write access.
 Call `connection_status` and verify the intended workspace and `team_admin` role. Confirm that
 `create_funnel` and `set_installation_events` are advertised before attempting a write. If the list
