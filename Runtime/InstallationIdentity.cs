@@ -60,7 +60,7 @@ namespace GameAnalytics.Client
 
         // Length-prefixed components keep the encoding unambiguous: no separator character or
         // concatenation of values can produce the same byte sequence as a different triple.
-        static byte[] Material(string? salt, string deviceId, string osUser)
+        static byte[] Material(string? salt, string? deviceId, string? osUser)
         {
             var builder = new StringBuilder(128);
             Append(builder, salt);
