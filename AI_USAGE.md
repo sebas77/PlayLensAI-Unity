@@ -19,9 +19,12 @@ For MCP setup, funnels and the server-owned pre-login event list, read
   client write key in `Headers["X-Api-Key"]`. Initialization is time synchronization,
   not proof of key validity. Inspect delivery results. Never embed the separate
   backend/server secret, owner tokens or dashboard credentials in a client.
-- The host creates and persists one installation UUID across launches. Supply a
-  launch session UUID when it must correlate with other systems; otherwise the
-  SDK creates one per client. User UUIDs come from the application's identity system.
+- The host owns the installation identity. It either persists one random UUID per
+  install, or derives it with `InstallationIdentity.TryDerive(device, osUser, salt)`
+  from a platform device key so a reinstall keeps the same entity; the derived form
+  still separates two OS accounts on one machine. A launch session UUID may be
+  supplied when it must correlate with other systems; otherwise the SDK creates one
+  per client. User UUIDs come from the application's identity system.
 - One `AnalyticsClient` owns its clock, binding, in-memory queue, retry policy and
   lifecycle. The host owns the borrowed `HttpClient`, consent, startup admissions
   and runtime delivery opportunities. The SDK never disposes the HTTP client.
@@ -117,7 +120,7 @@ rewrite raw event identities.
 | Identifier | Host/SDK responsibility and lifetime |
 | --- | --- |
 | `projectId` | Host configuration: the exact target project, unchanged for that client. It is not a user or session ID. |
-| `installationId` | Host-created UUID persisted across launches until reinstall or local-data reset. Do not generate it per login, event or flush. The current contract requires a non-null installation. |
+| `installationId` | Host-owned UUID identifying one pre-login entity. Either persisted across launches until reinstall/local-data reset, or derived once with `InstallationIdentity.TryDerive(device, osUser, salt)` so it survives a reinstall and still differs per OS account. Do not generate it per login, event or flush. The current contract requires a non-null installation. |
 | `SessionId` | One UUID for the application launch/session. The SDK creates one per client if omitted; supply the host's session ID when sharing context or recreating a client within that session. Do not regenerate it for each event or identity bind. |
 | `userId` | Stable UUID from the application's identity system. The same user keeps it across sessions and installations. Guest-to-registered continuation keeps that same UUID; an actually different account has a different UUID. Never derive it from email, generate it on every login, or let analytics decide account merges. |
 | `eventId` | One ID per logical event envelope. Track creates it unless supplied; SDK retries preserve both its ID and body bytes. Retry pending delivery with `FlushAsync`, not another Track call. Never reuse an ID for a different event or changed payload. |
@@ -127,6 +130,14 @@ The SDK does not persist host identifiers or recover an account after reinstall.
 The host must load its installation identity and obtain its existing user UUID
 from its own identity system. Client-owned attribution is not authentication or
 proof that a client-supplied UUID is trustworthy.
+
+A device-derived `installationId` is still a host decision: the assembly has no
+engine reference and cannot read a device key itself. The host supplies the device
+string and OS account (Unity: `SystemInfo.deviceUniqueIdentifier` and
+`Environment.UserName`), keeps a persisted random UUID as the fallback when the
+platform returns none, and accepts that a reinstall keeps the entity while a
+different OS account starts a new one. One OS account shared by several players
+still resolves to one entity; that limit is not removed by any device key.
 
 ### Binding and snapshot invariants
 
